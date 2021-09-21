@@ -1,6 +1,6 @@
 /* gifdec example -- simple GIF player using SDL2
  * compiling:
- *   cc `pkg-config --cflags --libs sdl2` -o example gifdec.c example.c
+ * cc -D_REENTRANT -I/usr/include/SDL2 -o example gifdec.c example.c -lSDL2
  * executing:
  *   ./example animation.gif
  * */
@@ -27,6 +27,7 @@ main(int argc, char *argv[])
     Uint32 pixel;
     int ret, paused, quit;
     Uint32 t0, t1, delay, delta;
+
 
     if (argc != 2) {
         fprintf(stderr, "usage:\n  %s gif-file\n", argv[0]);
@@ -62,6 +63,7 @@ main(int argc, char *argv[])
         SDL_Log("SDL_CreateRGBSurface() failed: %s", SDL_GetError());
         return 1;
     }
+    
     paused = 0;
     quit = 0;
     while (1) {
@@ -95,7 +97,7 @@ main(int argc, char *argv[])
                     pixel = SDL_MapRGB(surface->format, 0x7F, 0x7F, 0x7F);
                 else
                     pixel = SDL_MapRGB(surface->format, 0x00, 0x00, 0x00);
-                addr = surface->pixels + (i * surface->pitch + j * sizeof(pixel));
+                addr = (Uint8*)surface->pixels + (i * surface->pitch + j * sizeof(pixel));
                 memcpy(addr, &pixel, sizeof(pixel));
                 color += 3;
             }

@@ -30,6 +30,11 @@ typedef struct gd_GIF {
     gd_GCE gce;
     gd_Palette *palette;
     gd_Palette lct, gct;
+    uint16_t fx, fy, fw, fh;
+    uint8_t bgindex;
+    uint8_t *canvas, *frame;
+    uint8_t *gif_data;
+    uint32_t gif_data_idx;
     void (*plain_text)(
         struct gd_GIF *gif, uint16_t tx, uint16_t ty,
         uint16_t tw, uint16_t th, uint8_t cw, uint8_t ch,
@@ -37,12 +42,10 @@ typedef struct gd_GIF {
     );
     void (*comment)(struct gd_GIF *gif);
     void (*application)(struct gd_GIF *gif, char id[8], char auth[3]);
-    uint16_t fx, fy, fw, fh;
-    uint8_t bgindex;
-    uint8_t *canvas, *frame;
 } gd_GIF;
 
 gd_GIF *gd_open_gif(const char *fname);
+int gd_init_gif(gd_GIF *gif, uint8_t *raw);
 int gd_get_frame(gd_GIF *gif);
 void gd_render_frame(gd_GIF *gif, uint8_t *buffer);
 int gd_is_bgcolor(gd_GIF *gif, uint8_t color[3]);
