@@ -16,6 +16,15 @@
 #define MIN(A, B) ((A) < (B) ? (A) : (B))
 #define MAX(A, B) ((A) > (B) ? (A) : (B))
 
+#define GIF_OFFSET_HEADER       0
+#define GIF_OFFSET_VERSION      3
+#define GIF_OFFSET_WIDTH        6
+#define GIF_OFFSET_HEIGHT       8
+#define GIF_OFFSET_FDSZ         10
+#define GIF_OFFSET_BGC          11
+#define GIF_OFFSET_AR           12
+#define GIF_OFFSET_GCT          13
+
 typedef struct Entry {
     uint16_t length;
     uint16_t prefix;
@@ -28,90 +37,134 @@ typedef struct Table {
     Entry *entries;
 } Table;
 
-static uint16_t
-read_num(int fd)
-{
-    uint8_t bytes[2];
 
-    read(fd, bytes, 2);
-    return bytes[0] + (((uint16_t) bytes[1]) << 8);
+static void gif_read_data(gd_GIF *gif, uint8_t *dst, uint32_t len)
+{
+    memcpy(dst, &gif->gif_data[gif->gif_data_idx], len);
+    gif->gif_data_idx += len;
+}
+
+static void gif_skip_data(gd_GIF *gif, uint32_t n)
+{
+    gif->gif_data_idx += n;
 }
 
 gd_GIF *
 gd_open_gif(const char *fname)
 {
-    int fd;
-    uint8_t sigver[3];
-    uint16_t width, height, depth;
-    uint8_t fdsz, bgidx, aspect;
-    int i;
-    uint8_t *bgcolor;
-    int gct_sz;
-    gd_GIF *gif;
+    gd_GIF *gif = NULL;
+    uint32_t size;
 
-    fd = open(fname, O_RDONLY);
-    if (fd == -1) return NULL;
-#ifdef _WIN32
-    setmode(fd, O_BINARY);
-#endif
+    struct stat st;
+    if (stat(fname, &st) != 0){
+        fprintf(stderr, "Failt to get file size\n");
+        return NULL;
+    }
+
+    /* Create gd_GIF Structure. */
+    gif = calloc(1, sizeof(gd_GIF));
+
+    if(!gif){
+        fprintf(stderr, "Fail to allocate gif structure\n");
+        return NULL;
+    }
+
+    size = st.st_size;
+    gif->gif_data = (uint8_t*)malloc(size);
+
+    /* Read file to memory */
+    FILE *fp = fopen(fname, "r");
+    
+    if (fp == NULL){
+        return NULL;
+    }  
+    
+    fread(gif->gif_data, 1, size, fp);
+    fclose(fp);
+
+    int res = gd_init_gif(gif, gif->gif_data);
+
+    if(res){
+        free(gif->gif_data);
+        free(gif);
+        return NULL;
+    }
+    
+    return gif;
+}
+
+int gd_init_gif(gd_GIF *gif, uint8_t *raw)
+{
+    uint8_t sigver[3];
+    uint8_t fdsz, aspect;
+
     /* Header */
-    read(fd, sigver, 3);
+    memcpy(sigver, &raw[GIF_OFFSET_HEADER], 3);
     if (memcmp(sigver, "GIF", 3) != 0) {
         fprintf(stderr, "invalid signature\n");
-        goto fail;
+        return -1;
     }
+
     /* Version */
-    read(fd, sigver, 3);
+    memcpy(sigver,&raw[GIF_OFFSET_VERSION], 3);
     if (memcmp(sigver, "89a", 3) != 0) {
         fprintf(stderr, "invalid version\n");
-        goto fail;
+        return -1;
     }
+
     /* Width x Height */
-    width  = read_num(fd);
-    height = read_num(fd);
+    memcpy(&gif->width, &raw[GIF_OFFSET_WIDTH], 2);
+    memcpy(&gif->height, &raw[GIF_OFFSET_HEIGHT], 2);
+
     /* FDSZ */
-    read(fd, &fdsz, 1);
+    memcpy(&fdsz, &raw[GIF_OFFSET_FDSZ], 1);
+    
     /* Presence of GCT */
     if (!(fdsz & 0x80)) {
         fprintf(stderr, "no global color table\n");
-        goto fail;
+        return -1;
     }
+
     /* Color Space's Depth */
-    depth = ((fdsz >> 4) & 7) + 1;
+    gif->depth = ((fdsz >> 4) & 7) + 1;
+
     /* Ignore Sort Flag. */
     /* GCT Size */
-    gct_sz = 1 << ((fdsz & 0x07) + 1);
+    gif->gct.size = 1 << ((fdsz & 0x07) + 1);
+
     /* Background Color Index */
-    read(fd, &bgidx, 1);
+    memcpy(&gif->bgindex, &raw[GIF_OFFSET_BGC], 1);
+
     /* Aspect Ratio */
-    read(fd, &aspect, 1);
-    /* Create gd_GIF Structure. */
-    gif = calloc(1, sizeof(*gif) + 4 * width * height);
-    if (!gif) goto fail;
-    gif->fd = fd;
-    gif->width  = width;
-    gif->height = height;
-    gif->depth  = depth;
+    memcpy(&aspect, &raw[GIF_OFFSET_AR], 1);
+
     /* Read GCT */
-    gif->gct.size = gct_sz;
-    read(fd, gif->gct.colors, 3 * gif->gct.size);
+    memcpy(gif->gct.colors, &raw[GIF_OFFSET_GCT], 3 * gif->gct.size);
+    
+    gif->gif_data = raw;
     gif->palette = &gif->gct;
-    gif->bgindex = bgidx;
-    gif->canvas = (uint8_t *) &gif[1];
-    gif->frame = &gif->canvas[3 * width * height];
-    if (gif->bgindex)
+    
+    gif->canvas = (uint8_t*)malloc(4 * gif->width * gif->height);
+    gif->frame = &gif->canvas[3 * gif->width * gif->height];
+
+    if (gif->bgindex){
         memset(gif->frame, gif->bgindex, gif->width * gif->height);
-    bgcolor = &gif->palette->colors[gif->bgindex*3];
-    if (bgcolor[0] || bgcolor[1] || bgcolor [2])
-        for (i = 0; i < gif->width * gif->height; i++)
-            memcpy(&gif->canvas[i*3], bgcolor, 3);
-    gif->anim_start = lseek(fd, 0, SEEK_CUR);
-    goto ok;
-fail:
-    close(fd);
-ok:
-    return gif;
+    }
+    
+    uint8_t *bgcolor = &gif->palette->colors[gif->bgindex * 3];
+    
+    if (bgcolor[0] || bgcolor[1] || bgcolor [2]){
+        for (int i = 0; i < gif->width * gif->height; i++){
+            memcpy(&gif->canvas[i * 3], bgcolor, 3);
+        }
+    }
+
+    gif->anim_start = GIF_OFFSET_GCT + 3 * gif->gct.size;
+    gif->gif_data_idx = gif->anim_start;
+
+    return 0;   
 }
+
 
 static void
 discard_sub_blocks(gd_GIF *gif)
@@ -119,8 +172,8 @@ discard_sub_blocks(gd_GIF *gif)
     uint8_t size;
 
     do {
-        read(gif->fd, &size, 1);
-        lseek(gif->fd, size, SEEK_CUR);
+        gif_read_data(gif, &size, 1);
+        gif_skip_data(gif, size);
     } while (size);
 }
 
@@ -131,21 +184,22 @@ read_plain_text_ext(gd_GIF *gif)
         uint16_t tx, ty, tw, th;
         uint8_t cw, ch, fg, bg;
         off_t sub_block;
-        lseek(gif->fd, 1, SEEK_CUR); /* block size = 12 */
-        tx = read_num(gif->fd);
-        ty = read_num(gif->fd);
-        tw = read_num(gif->fd);
-        th = read_num(gif->fd);
-        read(gif->fd, &cw, 1);
-        read(gif->fd, &ch, 1);
-        read(gif->fd, &fg, 1);
-        read(gif->fd, &bg, 1);
-        sub_block = lseek(gif->fd, 0, SEEK_CUR);
+        /* block size = 12 */
+        gif_skip_data(gif, 1);
+        gif_read_data(gif, (uint8_t*)&tx, 2);
+        gif_read_data(gif, (uint8_t*)&ty, 2);
+        gif_read_data(gif, (uint8_t*)&tw, 2);
+        gif_read_data(gif, (uint8_t*)&th, 2);
+        gif_read_data(gif, &cw, 1);
+        gif_read_data(gif, &ch, 1);
+        gif_read_data(gif, &fg, 1);
+        gif_read_data(gif, &bg, 1);        
+        sub_block = gif->gif_data_idx;
         gif->plain_text(gif, tx, ty, tw, th, cw, ch, fg, bg);
-        lseek(gif->fd, sub_block, SEEK_SET);
+        gif->gif_data_idx = sub_block;
     } else {
         /* Discard plain text metadata. */
-        lseek(gif->fd, 13, SEEK_CUR);
+        gif_skip_data(gif, 13);
     }
     /* Discard plain text sub-blocks. */
     discard_sub_blocks(gif);
@@ -157,24 +211,24 @@ read_graphic_control_ext(gd_GIF *gif)
     uint8_t rdit;
 
     /* Discard block size (always 0x04). */
-    lseek(gif->fd, 1, SEEK_CUR);
-    read(gif->fd, &rdit, 1);
+    gif_skip_data(gif, 1);
+    gif_read_data(gif, &rdit, 1);
     gif->gce.disposal = (rdit >> 2) & 3;
     gif->gce.input = rdit & 2;
     gif->gce.transparency = rdit & 1;
-    gif->gce.delay = read_num(gif->fd);
-    read(gif->fd, &gif->gce.tindex, 1);
+    gif_read_data(gif, (uint8_t*)&gif->gce.delay, 2);
+    gif_read_data(gif, &gif->gce.tindex, 1);
     /* Skip block terminator. */
-    lseek(gif->fd, 1, SEEK_CUR);
+    gif_skip_data(gif, 1);
 }
 
 static void
 read_comment_ext(gd_GIF *gif)
 {
     if (gif->comment) {
-        off_t sub_block = lseek(gif->fd, 0, SEEK_CUR);
+        uint32_t sub_block = gif->gif_data_idx;
         gif->comment(gif);
-        lseek(gif->fd, sub_block, SEEK_SET);
+        gif->gif_data_idx = sub_block;
     }
     /* Discard comment sub-blocks. */
     discard_sub_blocks(gif);
@@ -187,21 +241,22 @@ read_application_ext(gd_GIF *gif)
     char app_auth_code[3];
 
     /* Discard block size (always 0x0B). */
-    lseek(gif->fd, 1, SEEK_CUR);
+    gif_skip_data(gif, 1);
     /* Application Identifier. */
-    read(gif->fd, app_id, 8);
+    gif_read_data(gif, app_id, 8);
     /* Application Authentication Code. */
-    read(gif->fd, app_auth_code, 3);
+    gif_read_data(gif, app_auth_code, 3);
+
     if (!strncmp(app_id, "NETSCAPE", sizeof(app_id))) {
         /* Discard block size (0x03) and constant byte (0x01). */
-        lseek(gif->fd, 2, SEEK_CUR);
-        gif->loop_count = read_num(gif->fd);
+        gif_skip_data(gif, 2);
+        gif_read_data(gif, (uint8_t*)&gif->loop_count, 2);
         /* Skip block terminator. */
-        lseek(gif->fd, 1, SEEK_CUR);
+        gif_skip_data(gif, 1);
     } else if (gif->application) {
-        off_t sub_block = lseek(gif->fd, 0, SEEK_CUR);
+        uint32_t sub_block = gif->gif_data_idx;
         gif->application(gif, app_id, app_auth_code);
-        lseek(gif->fd, sub_block, SEEK_SET);
+        gif->gif_data_idx = sub_block;
         discard_sub_blocks(gif);
     } else {
         discard_sub_blocks(gif);
@@ -213,7 +268,8 @@ read_ext(gd_GIF *gif)
 {
     uint8_t label;
 
-    read(gif->fd, &label, 1);
+    gif_read_data(gif, &label, 1);
+
     switch (label) {
     case 0x01:
         read_plain_text_ext(gif);
@@ -284,11 +340,11 @@ get_key(gd_GIF *gif, int key_size, uint8_t *sub_len, uint8_t *shift, uint8_t *by
         if (rpad == 0) {
             /* Update byte. */
             if (*sub_len == 0) {
-                read(gif->fd, sub_len, 1); /* Must be nonzero! */
+                gif_read_data(gif, sub_len, 1); /* Must be nonzero! */
                 if (*sub_len == 0)
                     return 0x1000;
             }
-            read(gif->fd, byte, 1);
+            gif_read_data(gif, byte, 1);
             (*sub_len)--;
         }
         frag_size = MIN(key_size - bits_read, 8 - rpad);
@@ -336,12 +392,12 @@ read_image_data(gd_GIF *gif, int interlace)
     Entry entry;
     off_t start, end;
 
-    read(gif->fd, &byte, 1);
+    gif_read_data(gif, &byte, 1);
     key_size = (int) byte;
-    start = lseek(gif->fd, 0, SEEK_CUR);
+    start = gif->gif_data_idx;
     discard_sub_blocks(gif);
-    end = lseek(gif->fd, 0, SEEK_CUR);
-    lseek(gif->fd, start, SEEK_SET);
+    end = gif->gif_data_idx;
+    gif->gif_data_idx = start;
     clear = 1 << key_size;
     stop = clear + 1;
     table = new_table(key_size);
@@ -392,8 +448,8 @@ read_image_data(gd_GIF *gif, int interlace)
     }
     free(table);
     if (key == stop)
-        read(gif->fd, &sub_len, 1); /* Must be zero! */
-    lseek(gif->fd, end, SEEK_SET);
+        gif_read_data(gif, &sub_len, 1); /* Must be zero! */
+    gif->gif_data_idx = end;
     return 0;
 }
 
@@ -406,18 +462,18 @@ read_image(gd_GIF *gif)
     int interlace;
 
     /* Image Descriptor. */
-    gif->fx = read_num(gif->fd);
-    gif->fy = read_num(gif->fd);
-    gif->fw = read_num(gif->fd);
-    gif->fh = read_num(gif->fd);
-    read(gif->fd, &fisrz, 1);
+    gif_read_data(gif, (uint8_t*)&gif->fx,2);
+    gif_read_data(gif, (uint8_t*)&gif->fy,2);
+    gif_read_data(gif, (uint8_t*)&gif->fw,2);
+    gif_read_data(gif, (uint8_t*)&gif->fh,2);
+    gif_read_data(gif, &fisrz, 1);
     interlace = fisrz & 0x40;
     /* Ignore Sort Flag. */
     /* Local Color Table? */
     if (fisrz & 0x80) {
         /* Read LCT */
         gif->lct.size = 1 << ((fisrz & 0x07) + 1);
-        read(gif->fd, gif->lct.colors, 3 * gif->lct.size);
+        gif_read_data(gif, gif->lct.colors, 3 * gif->lct.size);
         gif->palette = &gif->lct;
     } else
         gif->palette = &gif->gct;
@@ -448,20 +504,22 @@ dispose(gd_GIF *gif)
     int i, j, k;
     uint8_t *bgcolor;
     switch (gif->gce.disposal) {
-    case 2: /* Restore to background color. */
-        bgcolor = &gif->palette->colors[gif->bgindex*3];
-        i = gif->fy * gif->width + gif->fx;
-        for (j = 0; j < gif->fh; j++) {
-            for (k = 0; k < gif->fw; k++)
-                memcpy(&gif->canvas[(i+k)*3], bgcolor, 3);
-            i += gif->width;
-        }
-        break;
-    case 3: /* Restore to previous, i.e., don't update canvas.*/
-        break;
-    default:
-        /* Add frame non-transparent pixels to canvas. */
-        render_frame_rect(gif, gif->canvas);
+        case 2: /* Restore to background color. */
+            bgcolor = &gif->palette->colors[gif->bgindex*3];
+            i = gif->fy * gif->width + gif->fx;
+            for (j = 0; j < gif->fh; j++) {
+                for (k = 0; k < gif->fw; k++)
+                    memcpy(&gif->canvas[(i+k)*3], bgcolor, 3);
+                i += gif->width;
+            }
+            break;
+            
+        case 3: /* Restore to previous, i.e., don't update canvas.*/
+            break;
+
+        default:
+            /* Add frame non-transparent pixels to canvas. */
+            render_frame_rect(gif, gif->canvas);
     }
 }
 
@@ -472,17 +530,27 @@ gd_get_frame(gd_GIF *gif)
     char sep;
 
     dispose(gif);
-    read(gif->fd, &sep, 1);
+    
+    gif_read_data(gif, (uint8_t*)&sep, 1);
+
     while (sep != ',') {
-        if (sep == ';')
+        if (sep == ';'){
             return 0;
-        if (sep == '!')
+        }
+
+        if (sep == '!'){
             read_ext(gif);
-        else return -1;
-        read(gif->fd, &sep, 1);
+        }else{
+            return -1;
+        }        
+        
+        gif_read_data(gif, (uint8_t*)&sep, 1);
     }
-    if (read_image(gif) == -1)
+
+    if (read_image(gif) == -1){
         return -1;
+    }
+    
     return 1;
 }
 
@@ -502,12 +570,14 @@ gd_is_bgcolor(gd_GIF *gif, uint8_t color[3])
 void
 gd_rewind(gd_GIF *gif)
 {
-    lseek(gif->fd, gif->anim_start, SEEK_SET);
+    gif->gif_data_idx = gif->anim_start;
 }
 
 void
 gd_close_gif(gd_GIF *gif)
 {
-    close(gif->fd);
+    //close(gif->fd);
+    free(gif->canvas);
+    free(gif->gif_data);
     free(gif);
 }
