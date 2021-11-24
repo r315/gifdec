@@ -10,7 +10,7 @@ extern "C" {
 
 typedef struct gd_Palette {
     int size;
-    uint8_t colors[0x100 * 3];
+    uint8_t *colors;
 } gd_Palette;
 
 typedef struct gd_GCE {

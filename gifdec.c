@@ -96,19 +96,16 @@ gd_open_gif(const char *fname)
 
 int gd_init_gif(gd_GIF *gif, uint8_t *raw)
 {
-    uint8_t sigver[3];
-    uint8_t fdsz, aspect;
+    uint8_t fdsz;
 
     /* Header */
-    memcpy(sigver, &raw[GIF_OFFSET_HEADER], 3);
-    if (memcmp(sigver, "GIF", 3) != 0) {
+    if (memcmp(&raw[GIF_OFFSET_HEADER], "GIF", 3) != 0) {
         fprintf(stderr, "invalid signature\n");
         return -1;
     }
 
     /* Version */
-    memcpy(sigver,&raw[GIF_OFFSET_VERSION], 3);
-    if (memcmp(sigver, "89a", 3) != 0) {
+    if (memcmp(&raw[GIF_OFFSET_VERSION], "89a", 3) != 0) {
         fprintf(stderr, "invalid version\n");
         return -1;
     }
@@ -118,7 +115,7 @@ int gd_init_gif(gd_GIF *gif, uint8_t *raw)
     memcpy(&gif->height, &raw[GIF_OFFSET_HEIGHT], 2);
 
     /* FDSZ */
-    memcpy(&fdsz, &raw[GIF_OFFSET_FDSZ], 1);
+    fdsz = raw[GIF_OFFSET_FDSZ];
     
     /* Presence of GCT */
     if (!(fdsz & 0x80)) {
@@ -134,13 +131,13 @@ int gd_init_gif(gd_GIF *gif, uint8_t *raw)
     gif->gct.size = 1 << ((fdsz & 0x07) + 1);
 
     /* Background Color Index */
-    memcpy(&gif->bgindex, &raw[GIF_OFFSET_BGC], 1);
+    gif->bgindex = raw[GIF_OFFSET_BGC];
 
     /* Aspect Ratio */
-    memcpy(&aspect, &raw[GIF_OFFSET_AR], 1);
+    //memcpy(&aspect, &raw[GIF_OFFSET_AR], 1);
 
     /* Read GCT */
-    memcpy(gif->gct.colors, &raw[GIF_OFFSET_GCT], 3 * gif->gct.size);
+    gif->gct.colors = &raw[GIF_OFFSET_GCT];
     
     gif->gif_data = raw;
     gif->palette = &gif->gct;
@@ -244,9 +241,9 @@ read_application_ext(gd_GIF *gif)
     /* Discard block size (always 0x0B). */
     gif_skip_data(gif, 1);
     /* Application Identifier. */
-    gif_read_data(gif, app_id, 8);
+    gif_read_data(gif, (uint8_t*)app_id, 8);
     /* Application Authentication Code. */
-    gif_read_data(gif, app_auth_code, 3);
+    gif_read_data(gif, (uint8_t*)app_auth_code, 3);
 
     if (!strncmp(app_id, "NETSCAPE", sizeof(app_id))) {
         /* Discard block size (0x03) and constant byte (0x01). */
@@ -385,8 +382,8 @@ static int
 read_image_data(gd_GIF *gif, int interlace)
 {
     uint8_t sub_len, shift, byte;
-    int init_key_size, key_size, table_is_full;
-    int frm_off, frm_size, str_len, i, p, x, y;
+    int init_key_size, key_size, table_is_full = 0;
+    int frm_off, frm_size, str_len = 0, i, p, x, y;
     uint16_t key, clear, stop;
     int ret;
     Table *table;
@@ -408,14 +405,15 @@ read_image_data(gd_GIF *gif, int interlace)
     key = get_key(gif, key_size, &sub_len, &shift, &byte); /* clear code */
     frm_off = 0;
     ret = 0;
-    frm_size = gif->fw*gif->fh;
+    frm_size = gif->fw * gif->fh;
+
     while (frm_off < frm_size) {
 		if (key == clear) {
             key_size = init_key_size;
             table->nentries = (1 << (key_size - 1)) + 2;
             table_is_full = 0;
         } else if (!table_is_full) {
-            ret = add_entry(&table, str_len + 1, key, entry.suffix);
+            ret = add_entry(&table, (uint16_t)(str_len + 1), key, entry.suffix);
             if (ret == -1) {
                 free(table);
                 return -1;
@@ -451,10 +449,14 @@ read_image_data(gd_GIF *gif, int interlace)
         if (key < table->nentries - 1 && !table_is_full)
             table->entries[table->nentries - 1].suffix = entry.suffix;
     }
+
     free(table);
+    
     if (key == stop)
         gif_read_data(gif, &sub_len, 1); /* Must be zero! */
+    
     gif->gif_data_idx = end;
+    
     return 0;
 }
 
